@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sandie AI — Matching Prototype</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <meta name="description" content="Sandie AI demo: smarter, explainable people matching with serendipity" />
+  <style>
+    :root{
+      --bg:#0b0b0f; --panel:#111119; --muted:#9aa0aa; --ring:#8b5cf6; --text:#e5e7eb;
+    }
+    html,body{background:var(--bg); color:var(--text)}
+    .card{ background:linear-gradient(180deg, rgba(139,92,246,0.06), rgba(139,92,246,0.03)); border:1px solid rgba(139,92,246,0.25)}
+    .btn{ transition:transform .05s ease, box-shadow .15s ease }
+    .btn:active{ transform:translateY(1px) }
+    .pill{ border:1px solid rgba(139,92,246,.45) }
+    .checkbox:checked + span{ background:#8b5cf6; color:white; border-color:#8b5cf6 }
+    .radio:checked + span{ background:#8b5cf6; color:white; border-color:#8b5cf6 }
+    .ring-focus{ outline:none; box-shadow:0 0 0 3px rgba(139,92,246,.45) }
+    .divider{height:1px; background:linear-gradient(90deg, transparent, rgba(139,92,246,.35), transparent)}
+  </style>
+</head>
+<body class="h-full">
+  <div id="app" class="min-h-screen">
+    <!-- Header -->
+    <header class="sticky top-0 z-30 backdrop-blur bg-[rgba(11,11,15,.6)] border-b border-[rgba(139,92,246,.2)]">
+      <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <button id="navOnboarding" class="btn px-3 py-1.5 rounded-xl border border-violet-500/40 text-sm hover:bg-violet-500/10">Onboarding</button>
+          <button id="navMatches" class="btn px-3 py-1.5 rounded-xl bg-violet-500 hover:bg-violet-600 text-white text-sm">See Matches</button>
+          <button id="navTech" class="btn px-3 py-1.5 rounded-xl border border-violet-500/40 text-sm hover:bg-violet-500/10">Tech Demo</button>
+          <a href="#" id="githubLink" class="hidden sm:inline text-sm text-slate-400 hover:text-white underline/50">Export JSON</a>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main -->
+    <main class="max-w-6xl mx-auto px-4 py-6" id="main"></main>
+
+    <footer class="max-w-6xl mx-auto px-4 pb-10 pt-6 text-sm text-slate-400">
+      Built for demo purposes. No external requests. Data stays in your browser (localStorage). © Sandie Labs.
+    </footer>
+  </div>
+
+<script>
+/***********************************
+ * Sandie AI — Pure HTML/JS Prototype
+ * Deployable as static site (Vercel)
+ ***********************************/
+
+// ----------------------- Utilities -----------------------
+const $ = sel => document.querySelector(sel)
+const $$ = sel => [...document.querySelectorAll(sel)]
+const uid = () => Math.random().toString(36).slice(2)
+
+function save(key, val){ localStorage.setItem(key, JSON.stringify(val)) }
+function load(key, def){ try{ return JSON.parse(localStorage.getItem(key)) ?? def }catch{ return def } }
+
+// Simple cosine similarity for sparse term counts
+function cosine(a,b){
+  let dot=0, na=0, nb=0
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+  keys.forEach(k=>{ const va=a[k]||0, vb=b[k]||0; dot += va*vb; na += va*va; nb += vb*vb })
+  const denom = Math.sqrt(na)*Math.sqrt(nb)
+  return denom ? dot/denom : 0
+}
+
+function jaccard(setA, setB){
+  const A = new Set(setA), B = new Set(setB)
+  const inter = new Set([...A].filter(x=>B.has(x))).size
+  const uni = new Set([...A, ...B]).size
+  return uni? inter/uni : 0
+}
+
+function tokenize(txt){
+  return (txt||"")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s#@+]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+function bow(text){
+  const m={}; tokenize(text).forEach(t=>{ m[t]=(m[t]||0)+1 }); return m
+}
+
+function clamp(x,a,b){ return Math.max(a, Math.min(b, x)) }
+
+// ----------------------- Schema -----------------------
+const QUESTIONS = [
+  { id:'bio', type:'textarea', title:'Social bio / interests (optional)', help:'Paste a short bio, interests, favorite artists, sports teams — Sandie will use it for smarter matching.' },
+  { id:'hobbies', type:'multi', title:'What are some of your hobbies?', options:['Sports','Arts and Crafts','Outdoor Activities','Cooking and Baking','Travel','Make Up and Fashion','TV Shows/Films','Video Games/Board Games'] },
+  { id:'admire_quality', type:'single', title:'Which quality do you admire most in others?', options:['Empathy and kindness','Determination and ambition','Creativity and open-mindedness','Sense of humour and fun-loving spirit'] },
+  { id:'humor_style', type:'single', title:'How would you describe your sense of humour?', options:['Sarcastic','Observational','Witty','Self-deprecating','Mix'] },
+  { id:'music_taste', type:'multi', title:'How would you describe your music taste?', options:['Rock','Classical','Hip-hop','Country','Pop','Electronic/Techno','A mix of everything'] },
+  { id:'diet', type:'multi', title:'What do you eat?', options:['A taste for everything','Vegetarian','Vegan','Gluten-Free','Halal','Kosher','Pescatarian'] },
+  { id:'yob', type:'number', title:'Year of Birth', help:'We never share these details with others.' },
+  { id:'nearest_city', type:'single', title:'Your Nearest City', options:['London','Birmingham','Bristol','Cardiff','Edinburgh','Glasgow','Manchester','Leeds'] },
+  { id:'event_type', type:'single', title:'Event Type (depends on city)', dynamic:true }
+]
+
+const EVENTS_BY_CITY = {
+  London:[
+    ['Social drinks (Mon 7pm)','drinks_mon_19'],
+    ['Dinner (Tue 7pm)','dinner_tue_19'],
+    ['Board Game Cafe (Thu 7pm)','boardgame_thu_19'],
+    ['Bowling (Fri 7pm)','bowling_fri_19']
+  ],
+  Birmingham:[
+    ['Flight Club (Mon 7pm)','flight_mon_19'],
+    ['Dinner (Tue 7pm)','dinner_tue_19'],
+    ['Board Game Cafe (Thu 7pm)','boardgame_thu_19'],
+    ['Bowling (Fri 7pm)','bowling_fri_19']
+  ],
+  Bristol:[['Dinner (Tue 7pm)','dinner_tue_19'],['Board Game (Thu)','boardgame_thu_19']],
+  Cardiff:[['Dinner (Tue 7pm)','dinner_tue_19'],['Bowling (Fri 7pm)','bowling_fri_19']],
+  Edinburgh:[['Drinks (Mon 7pm)','drinks_mon_19'],['Board Game (Thu)','boardgame_thu_19']],
+  Glasgow:[['Drinks (Mon 7pm)','drinks_mon_19'],['Bowling (Fri 7pm)','bowling_fri_19']],
+  Manchester:[['Dinner (Tue 7pm)','dinner_tue_19'],['Board Game (Thu)','boardgame_thu_19']],
+  Leeds:[['Drinks (Mon 7pm)','drinks_mon_19'],['Bowling (Fri 7pm)','bowling_fri_19']]
+}
+
+// ----------------------- Demo Data -----------------------
+const NAMES = ["Alex","Sam","Taylor","Jordan","Casey","Riley","Morgan","Jamie","Drew","Avery","Quinn","Harper","Elliot","Cameron","Skyler","Parker"]
+const HOB = QUESTIONS.find(q=>q.id==='hobbies').options
+const MUS = QUESTIONS.find(q=>q.id==='music_taste').options
+const HUM = QUESTIONS.find(q=>q.id==='humor_style').options
+const DIET = QUESTIONS.find(q=>q.id==='diet').options
+const QUAL = QUESTIONS.find(q=>q.id==='admire_quality').options
+const CITIES = QUESTIONS.find(q=>q.id==='nearest_city').options
+
+function sample(arr,k=1){ const a=[...arr]; const out=[]; for(let i=0;i<k;i++){ out.push(a.splice(Math.floor(Math.random()*a.length),1)[0]) } return out }
+function sampleMany(arr,p=0.4){ return arr.filter(()=>Math.random()<p) }
+
+function createProfile(i){
+  const city = CITIES[Math.floor(Math.random()*CITIES.length)]
+  const evArr = EVENTS_BY_CITY[city] || []
+  const event = evArr.length? evArr[Math.floor(Math.random()*evArr.length)][1] : 'dinner_tue_19'
+  const yob = 1978 + Math.floor(Math.random()*24) // 1978..2001 (24–47)
+  const diet = Math.random()<0.65? ['A taste for everything'] : sample(DIET.slice(1),1)
+  const hobbies = sampleMany(HOB, 0.45)
+  if(hobbies.length===0) hobbies.push(sample(HOB,1)[0])
+  const music = sampleMany(MUS, 0.35)
+  if(music.length===0) music.push(sample(MUS,1)[0])
+  const humor = sample(HUM,1)[0]
+  const admire = sample(QUAL,1)[0]
+  const bio = `${city} • ${music[0]} • ${hobbies[0]} • loves ${Math.random()<.5? 'indie rock' : 'football'} and ${Math.random()<.5? 'board games' : 'hiking'}`
+  return {
+    id: 'u'+(1000+i), name: NAMES[i%NAMES.length], city, event, yob, diet,
+    hobbies, music, humor, admire,
+    bio, textVec: bow(bio)
+  }
+}
+
+const POOL = Array.from({length: 28}, (_,i)=> createProfile(i))
+
+// ----------------------- State -----------------------
+const state = load('sandie_state', {
+  step:0,
+  answers:{ bio:'', hobbies:[], admire_quality:null, humor_style:null, music_taste:[], diet:[], yob:'', nearest_city:null, event_type:null },
+  serendipity: 0.35,
+  strict:false,
+  matches:[]
+})
+
+function persist(){ save('sandie_state', state) }
+
+// ----------------------- Views -----------------------
+function render(){
+  const main = $('#main');
+  const atMatches = state.step===999;
+  const atTech = state.step===998;
+  if(atMatches){
+    main.innerHTML = matchesView();
+    attachMatchHandlers();
+  } else if(atTech){
+    main.innerHTML = techView();
+    attachTechHandlers();
+  } else {
+    main.innerHTML = onboardingView(state.step);
+    attachOnboardingHandlers();
+  }
+}
+
+// ---------- Onboarding UI ----------
+function onboardingView(step){
+  const q = QUESTIONS[step]
+  if(!q) { state.step = 999; persist(); return matchesView() }
+
+  const progress = Math.round((step)/QUESTIONS.length*100)
+  let html = `
+    <div class="mb-6 flex items-center justify-between">
+      <div>
+        <div class="text-sm text-slate-400">Step ${step+1} / ${QUESTIONS.length}</div>
+        <h2 class="text-2xl sm:text-3xl font-bold mt-1">${q.title}</h2>
+        ${q.help? `<p class='text-slate-400 mt-1 text-sm'>${q.help}</p>`:''}
+      </div>
+      <div class="w-40 h-2 rounded-full bg-slate-700/50 overflow-hidden"><div style="width:${progress}%" class="h-full bg-violet-500"></div></div>
+    </div>
+  `
+
+  html += `<div class="grid gap-3">`
+  const val = state.answers[q.id]
+
+  if(q.type==='textarea'){
+    html += `<textarea id="f_${q.id}" rows="5" class="ring-focus rounded-xl bg-[#0f0f16] border border-violet-500/30 p-3" placeholder="e.g. Indie rock, Catan, hiking, Arsenal FC..."></textarea>`
+  }
+  if(q.type==='number'){
+    html += `<input id="f_${q.id}" type="number" inputmode="numeric" class="ring-focus rounded-xl bg-[#0f0f16] border border-violet-500/30 p-3 w-48" placeholder="1996" />`
+  }
+  if(q.type==='multi'){
+    q.options.forEach(opt=>{
+      const id = uid()
+      const checked = (val||[]).includes(opt)
+      html += `
+        <label class="cursor-pointer flex items-center">
+          <input type="checkbox" class="checkbox hidden" ${checked?'checked':''} data-type="multi" data-qid="${q.id}" value="${opt}" />
+          <span class="pill flex-1 rounded-2xl px-4 py-3">${opt}</span>
+        </label>`
+    })
+  }
+  if(q.type==='single'){
+    const opts = q.dynamic ? (EVENTS_BY_CITY[state.answers.nearest_city||'']||[]).map(x=>x[0]) : q.options
+    if(!opts || opts.length===0){
+      html += `<div class='text-slate-400'>Pick a city first.</div>`
+    } else {
+      opts.forEach(opt=>{
+        const id = uid()
+        const checked = val===opt
+        html += `
+        <label class="cursor-pointer flex items-center">
+          <input type="radio" class="radio hidden" name="${q.id}" ${checked?'checked':''} data-type="single" data-qid="${q.id}" value="${opt}" />
+          <span class="pill flex-1 rounded-2xl px-4 py-3">${opt}</span>
+        </label>`
+      })
+    }
+  }
+  html += `</div>`
+
+  html += `
+    <div class="flex justify-between items-center mt-6">
+      <button id="prev" class="btn px-4 py-2 rounded-xl border border-violet-500/40">Back</button>
+      <div class="flex items-center gap-3">
+        <button id="skip" class="btn px-4 py-2 rounded-xl border border-violet-500/40 text-slate-300">Skip</button>
+        <button id="next" class="btn px-5 py-2 rounded-xl bg-violet-500 hover:bg-violet-600 text-white">Next</button>
+      </div>
+    </div>
+  `
+
+  return html
+}
+
+function attachOnboardingHandlers(){
+  const step = state.step
+  const q = QUESTIONS[step]
+
+  // prefill
+  if(q.type==='textarea'){ $(`#f_${q.id}`).value = state.answers[q.id]||'' }
+  if(q.type==='number'){ $(`#f_${q.id}`).value = state.answers[q.id]||'' }
+
+  // live changes
+  if(q.type==='textarea'){
+    $(`#f_${q.id}`).addEventListener('input', e=>{ state.answers[q.id]=e.target.value; persist() })
+  }
+  if(q.type==='number'){
+    $(`#f_${q.id}`).addEventListener('input', e=>{ state.answers[q.id]=e.target.value; persist() })
+  }
+  if(q.type==='multi'){
+    $$('input.checkbox').forEach(el=>{
+      el.addEventListener('change', e=>{
+        const arr = new Set(state.answers[q.id]||[])
+        if(e.target.checked) arr.add(e.target.value); else arr.delete(e.target.value)
+        state.answers[q.id] = [...arr]; persist(); render()
+      })
+    })
+  }
+  if(q.type==='single'){
+    $$('input.radio').forEach(el=>{
+      el.addEventListener('change', e=>{
+        state.answers[q.id] = e.target.value; persist(); render()
+        // if picking city affects event list, reset event_type
+        if(q.id==='nearest_city'){ state.answers.event_type=null }
+      })
+    })
+  }
+
+  $('#prev').onclick = ()=>{ if(state.step>0){ state.step--; persist(); render() } }
+  $('#skip').onclick = ()=>{ if(state.step<QUESTIONS.length-1){ state.step++; persist(); render() } else { state.step=999; persist(); render() } }
+  $('#next').onclick = ()=>{
+    // simple validation examples
+    if(q.id==='yob'){
+      const y = parseInt(state.answers.yob,10)
+      const now = new Date().getFullYear()
+      if(!y || y<1900 || y>now-13){ alert('Please enter a valid year of birth (13+).'); return }
+    }
+    if(q.id==='event_type' && !state.answers.event_type){
+      alert('Pick an event type'); return
+    }
+    if(state.step<QUESTIONS.length-1){ state.step++; persist(); render() } else { state.step=999; persist(); render() }
+  }
+
+  $('#navOnboarding').onclick = ()=>{ state.step = 0; persist(); render() }
+  $('#navMatches').onclick = ()=>{ state.step = 999; persist(); render() }
+  $('#navTech').onclick = ()=>{ state.step = 998; persist(); render() }
+  $('#githubLink').onclick = (e)=>{e.preventDefault(); const blob = new Blob([JSON.stringify({user:state.answers, matches:state.matches},null,2)], {type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='sandie_export.json'; a.click(); URL.revokeObjectURL(url) }
+}
+
+// ---------- Matching ----------
+function buildUser(){
+  const a = state.answers
+  const age = (new Date().getFullYear()) - parseInt(a.yob||'0',10)
+  const city = a.nearest_city
+  // map dynamic event label->id
+  let eventId = null
+  if(a.event_type){
+    const pair = (EVENTS_BY_CITY[city]||[]).find(x=>x[0]===a.event_type)
+    eventId = pair? pair[1] : null
+  }
+  const text = `${a.bio||''}\n${(a.hobbies||[]).join(' ')} ${(a.music_taste||[]).join(' ')} ${(a.humor_style||'')} ${(a.admire_quality||'')}`
+  return {
+    city, event:eventId, yob: a.yob? parseInt(a.yob,10):null, diet:a.diet||[],
+    hobbies:a.hobbies||[], music:a.music_taste||[], humor:a.humor_style||'', admire:a.admire_quality||'',
+    bio:a.bio||'', textVec: bow(text), name:'You'
+  }
+}
+
+function compatibleDiet(uDiet, vDiet){
+  const U = new Set(uDiet||[]), V = new Set(vDiet||[])
+  if(U.size===0 || U.has('A taste for everything')) return true
+  // require overlap of restrictions (simple rule)
+  return [...U].some(x=> V.has(x))
+}
+
+function hardFilter(user, p){
+  if(user.city && p.city!==user.city) return false
+  if(user.event && p.event!==user.event) return false
+  if(user.yob){ const age = (new Date().getFullYear())-user.yob; if(age<18) return false }
+  if(!compatibleDiet(user.diet, p.diet)) return false
+  return true
+}
+
+function styleCompat(a,b){ if(!a||!b) return 0.5; if(a===b) return 1; if(a==='Mix'||b==='Mix') return .7; return .55 }
+
+function reasons(user, p){
+  const R=[]
+  const interH = user.hobbies.filter(x=>p.hobbies.includes(x))
+  const interM = user.music.filter(x=>p.music.includes(x))
+  if(interH.length) R.push(`Both enjoy ${interH[0]}`)
+  if(interM.length) R.push(`Shared music: ${interM[0]}`)
+  if(styleCompat(user.humor, p.humor)>0.9) R.push('Similar sense of humour')
+  if(user.admire && p.admire && user.admire===p.admire) R.push('Value the same qualities')
+  // text tokens overlap
+  const toksU = new Set(Object.keys(user.textVec)), toksV = new Set(Object.keys(p.textVec))
+  const inter = [...toksU].filter(t=>t.length>3 && toksV.has(t))
+  if(inter.length) R.push(`Both mention “${inter[0]}”`)
+  if(!R.length) R.push('Serendipitous pick based on similar vibes')
+  return R.slice(0,3)
+}
+
+function score(user, p, ser){
+  // base components
+  const H = jaccard(user.hobbies, p.hobbies)
+  const M = jaccard(user.music, p.music)
+  const T = cosine(user.textVec, p.textVec)
+  const S = styleCompat(user.humor, p.humor)
+  const Q = user.admire && p.admire && user.admire===p.admire ? 1 : 0
+
+  // serendipity shifts weight from strict overlaps -> textual/latent + adds tiny noise
+  const wH = 0.22*(1-ser)
+  const wM = 0.20*(1-ser)
+  const wT = 0.35*(0.6+ser) // grows with ser
+  const wS = 0.13
+  const wQ = 0.10*(1-0.5*ser)
+
+  let base = wH*H + wM*M + wT*T + wS*S + wQ*Q
+  base += (ser*0.05)*(Math.random()-0.5) // a pinch of exploration
+  return clamp(base, 0, 1)
+}
+
+function computeMatches(){
+  const user = buildUser()
+  const ser = state.serendipity
+  const MIN = 3, MAX = 5
+  const target = Math.max(MIN, Math.min(MAX, Math.round(3 + ser*2))) // 3..5 based on serendipity
+
+  // helper to merge unique candidates by id
+  const pushUnique = (arr, more)=>{
+    const seen = new Set(arr.map(x=>x.id))
+    more.forEach(p=>{ if(!seen.has(p.id)){ arr.push(p); seen.add(p.id) } })
+    return arr
+  }
+
+  // 1) strict candidates (hard filters)
+  let poolList = POOL.filter(p=> hardFilter(user,p))
+
+  // 2) Backoff: relax EVENT (keep city, age, diet)
+  if(poolList.length < target){
+    const u1 = {...user, event:null}
+    poolList = pushUnique(poolList, POOL.filter(p=> hardFilter(u1,p)))
+  }
+  // 3) Backoff: relax CITY as well (keep age, diet)
+  if(poolList.length < target){
+    const u2 = {...user, city:null, event:null}
+    poolList = pushUnique(poolList, POOL.filter(p=> hardFilter(u2,p)))
+  }
+  // 4) Last resort: keep only 18+ age check (allow any diet if user has 'A taste for everything' or no diet)
+  if(poolList.length < target){
+    const year = new Date().getFullYear()
+    poolList = pushUnique(poolList, POOL.filter(p=> (year - p.yob) >= 18))
+  }
+
+  // Score all unique candidates against the ORIGINAL user profile
+  const scored = poolList.map(p=> ({ p, s: score(user,p,ser) }))
+  scored.sort((a,b)=> b.s - a.s)
+
+  // Keep between 3 and 5
+  state.matches = scored.slice(0, target).map(({p,s})=> ({...p, _score: s, _reasons: reasons(user,p)}))
+  persist()
+}
+
+// ---------- Matches UI ----------
+function matchesControls(){
+  return `
+  <div class="card rounded-2xl p-4">
+    <h3 class="font-semibold text-lg mb-2">Discovery level</h3>
+    <input id="ser" type="range" min="0" max="1" step="0.01" value="${state.serendipity}" class="w-full">
+    <div class="text-sm text-slate-400 flex justify-between mt-1"><span>Strict</span><span>Adventurous</span></div>
+
+    <label class="mt-4 flex items-center gap-2 text-sm">
+      <input id="strict" type="checkbox" ${state.strict?'checked':''}>
+      <span>Only strict matches</span>
+    </label>
+
+    <div class="mt-4 flex gap-2">
+      <button id="recompute" class="btn flex-1 rounded-xl bg-violet-500 hover:bg-violet-600 text-white py-2">Rebuild list</button>
+      <button id="editAnswers" class="btn flex-1 rounded-xl border border-violet-500/40 py-2">Edit answers</button>
+    </div>
+  </div>`
+}
+
+function matchCard(m){
+  const age = new Date().getFullYear() - m.yob
+  const reasons = m._reasons || []
+  const chips = reasons.map(r=>`<span class="text-xs px-2 py-1 rounded-full border border-violet-500/40">${r}</span>`).join(' ')
+  const tags = [...m.hobbies.slice(0,2), ...m.music.slice(0,1)].map(t=>`<span class="text-xs px-2 py-1 rounded-full bg-violet-500/15 border border-violet-500/30">${t}</span>`).join(' ')
+  return `
+    <div class="card rounded-2xl p-4 flex flex-col gap-3">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="text-lg font-semibold">${m.name} • ${age}</div>
+          <div class="text-sm text-slate-400">${m.city} • ${m.event.replaceAll('_',' ')}</div>
+        </div>
+        <div class="text-sm font-mono text-violet-400">${(m._score*100).toFixed(0)}%</div>
+      </div>
+      <div class="text-sm text-slate-300">${m.bio}</div>
+      <div class="flex flex-wrap gap-2">${tags}</div>
+      <div class="divider"></div>
+      <div class="flex flex-wrap gap-2">${chips}</div>
+      <div class="flex gap-2 pt-2">
+        <button class="btn flex-1 rounded-xl bg-violet-500 hover:bg-violet-600 text-white py-2" data-like="${m.id}">Like</button>
+        <button class="btn flex-1 rounded-xl border border-violet-500/40 py-2" data-skip="${m.id}">Skip</button>
+      </div>
+    </div>`
+}
+
+function matchesView(){
+  // ensure computed
+  computeMatches()
+  const left = matchesControls()
+  const cards = state.matches.map(matchCard).join('')
+  const user = buildUser()
+  const eventLabel = (EVENTS_BY_CITY[user.city]?.find(x=>x[1]===user.event)?.[0]) || 'Unspecified event'
+
+  return `
+    <section class="grid grid-cols-1 md:grid-cols-[280px,1fr] gap-6">
+      <aside>${left}</aside>
+      <div>
+        <div class="mb-4">
+          <h2 class="text-2xl font-bold">Sandie's picks</h2>
+          <p class="text-slate-400 text-sm">City: <span class="text-white">${user.city||'—'}</span> • Event: <span class="text-white">${eventLabel}</span></p>
+        </div>
+        <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4" id="cards">${cards}</div>
+      </div>
+    </section>`
+}
+
+function attachMatchHandlers(){
+  $('#ser').addEventListener('input', e=>{ state.serendipity = +e.target.value; persist(); })
+  $('#strict').addEventListener('change', e=>{ state.strict = e.target.checked; persist(); })
+  $('#recompute').onclick = ()=>{ computeMatches(); render() }
+  $('#editAnswers').onclick = ()=>{ state.step = 0; persist(); render() }
+  $$('#cards [data-like]').forEach(btn=> btn.onclick = ()=>{ btn.textContent='Liked ✓'; btn.disabled=true; btn.classList.add('opacity-70') })
+  $$('#cards [data-skip]').forEach(btn=> btn.onclick = ()=>{ btn.closest('.card').remove(); const left = document.querySelectorAll('#cards .card').length; if(left < 3){ computeMatches(); render() } })
+
+  $('#navOnboarding').onclick = ()=>{ state.step = 0; persist(); render() }
+  $('#navMatches').onclick = ()=>{ state.step = 999; persist(); render() }
+  $('#navTech').onclick = ()=>{ state.step = 998; persist(); render() }
+  $('#githubLink').onclick = (e)=>{e.preventDefault(); const blob = new Blob([JSON.stringify({user:state.answers, matches:state.matches},null,2)], {type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='sandie_export.json'; a.click(); URL.revokeObjectURL(url) }
+}
+
+// ---------- Tech Demo View ----------
+function techView(){
+  return `
+  <section class="grid gap-6">
+    <div class="card rounded-2xl p-6">
+      <h2 class="text-2xl font-bold mb-1">🔬 Tech Demo</h2>
+      <p class="text-slate-300">Sandie AI is a <span class="text-violet-300 font-medium">Friendship Operating System</span>: a layer that helps people form the right connections by combining strict filters with meaningful serendipity. Below is how it works under the hood.</p>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="card rounded-2xl p-5">
+        <h3 class="text-lg font-semibold mb-2">🧭 Friendship Operating System (FOS)</h3>
+        <ul class="list-disc pl-5 space-y-1 text-slate-300">
+          <li><b>Signals</b>: onboarding answers, social bio, event activity, Like/Skip feedback.</li>
+          <li><b>Reasoning</b>: a hybrid of embeddings and rules that detects direct and indirect links.</li>
+          <li><b>Serendipity Control</b>: the "Strict ↔ Adventurous" dial shifts scoring weights.</li>
+          <li><b>Explainability</b>: clear "why we matched you" reasons on every card.</li>
+          <li><b>Privacy</b>: opt‑in only; personal details aren’t exposed to other users.</li>
+        </ul>
+      </div>
+
+      <div class="card rounded-2xl p-5">
+        <h3 class="text-lg font-semibold mb-2">🏗️ Architecture (prod)</h3>
+        <ol class="list-decimal pl-5 space-y-1 text-slate-300">
+          <li><b>Ingest</b> onboarding/social data → normalize into tags and text.</li>
+          <li><b>Embeddings</b> for profile and interests → vector index (ANN).</li>
+          <li><b>Retriever</b> returns candidates instantly (FAISS/HNSW).</li>
+          <li><b>Scoring</b> mixes Jaccard, cosine, topics, and a co‑interest graph.</li>
+          <li><b>LLM Reranker</b> refines the top set and crafts explanations.</li>
+          <li><b>Safety & Privacy</b> access policies, deletion, anti‑spam.</li>
+        </ol>
+        <p class="text-slate-400 text-sm mt-2">This demo uses local simplifications (bag‑of‑words instead of full embeddings).</p>
+      </div>
+    </div>
+
+    <div class="card rounded-2xl p-5">
+      <h3 class="text-lg font-semibold mb-2">🚀 Signature Sandie algorithms (demo)</h3>
+      <div class="grid md:grid-cols-2 gap-3 text-slate-300">
+        <div>
+          <p class="mb-1"><b>Vibe Embeddings</b> — a vector that blends onboarding and social bio to capture a person’s vibe.</p>
+          <p class="mb-1"><b>Latent Affinity Graph</b> — a graph of hidden interest links (PMI/lift) that suggests unexpected bridges.</p>
+          <p class="mb-1"><b>Event‑Aware Reranker</b> — re‑weights by event schedule and co‑attendance likelihood.</p>
+        </div>
+        <div>
+          <p class="mb-1"><b>Dietary Compatibility Resolver</b> — respects restrictions without starving the feed.</p>
+          <p class="mb-1"><b>Serendipity Dial</b> — tunes bold recommendations without losing relevance.</p>
+          <p class="mb-1"><b>Icebreaker Synth</b> — generates concrete conversation starters from shared signals.</p>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <div class="text-slate-400 text-sm">Demo note: all computation runs in your browser; data does not leave the device. In production we use embeddings and model reranking for even more precise recommendations.</div>
+  </section>`
+}
+
+function attachTechHandlers(){
+  $('#navOnboarding').onclick = ()=>{ state.step = 0; persist(); render() }
+  $('#navMatches').onclick = ()=>{ state.step = 999; persist(); render() }
+  $('#navTech').onclick = ()=>{ state.step = 998; persist(); render() }
+  $('#githubLink').onclick = (e)=>{e.preventDefault(); const blob = new Blob([JSON.stringify({user:state.answers, matches:state.matches},null,2)], {type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='sandie_export.json'; a.click(); URL.revokeObjectURL(url) }
+}
+
+// Initial render
+render()
+</script>
+</body>
+</html>
